@@ -120,7 +120,7 @@ def compute_feat_quantiles(acts: torch.Tensor, level=10, ignore_first=True):
         if feat_acts.size(0) == 0:
             feat_quantiles.append(torch.zeros(level))
             continue
-        feat_quantile = torch.quantile(feat_acts, torch.linspace(0, 1, level + 1)[1:])
+        feat_quantile = torch.quantile(feat_acts.float(), torch.linspace(0, 1, level + 1)[1:]).to(torch.float16)
         feat_quantiles.append(feat_quantile)
     return torch.stack(feat_quantiles)
 
@@ -139,8 +139,8 @@ def plot_quantiles_on_ax(ax, quantiles, log_scale=False, palette="mako"):
             })
     df = pd.DataFrame(data)
     sns.lineplot(
-        data=df, x="Feature", y="Activation", hue="Decile",
-        palette=palette, linewidth=1, alpha=0.7, legend=False, ax=ax
+        data=df, x="Feature", y="Activation", hue="Decile", marker="o", markeredgewidth=0,
+        palette=palette, linewidth=0, alpha=0.7, legend=False, ax=ax
     )
     if log_scale:
         ax.set_yscale('log')
@@ -186,7 +186,7 @@ def main(num_samples=200, sae_id="jbloom/GPT2-Small-SAEs-Reformatted", llm_id="g
                 act = sae.encode(hidden_state).float()
                 recon = sae.decode(act)
                 act = act.to(torch.float16)
-                l1 = torch.mean(torch.abs(act), dim=2)
+                l1 = torch.sum(torch.abs(act), dim=2) * 8e-05 # L1 coefficient from huggingface config
                 l2 = F.mse_loss(hidden_state, recon, reduction='none').mean(dim=2)
                 all_acts.append(act.cpu())
                 all_l1.append(l1.unsqueeze(0).to(torch.float16).cpu())
@@ -216,7 +216,7 @@ def main(num_samples=200, sae_id="jbloom/GPT2-Small-SAEs-Reformatted", llm_id="g
         token_densities[layer_i] = t_density.cpu().numpy()
         sae_token_l1[layer_i] = stacked_l1.numpy()
         sae_token_l2[layer_i] = stacked_l2.numpy()
-        sae_token_losses[layer_i] = ((stacked_l1 + stacked_l2) / 2.0).numpy()
+        sae_token_losses[layer_i] = (stacked_l1 + stacked_l2).numpy()
         feat_means[layer_i] = f_mean.cpu().numpy()
         feat_stds[layer_i] = f_std.cpu().numpy()
         feat_counts[layer_i] = f_count.cpu().numpy()
@@ -252,7 +252,9 @@ def main(num_samples=200, sae_id="jbloom/GPT2-Small-SAEs-Reformatted", llm_id="g
 
     plt.tight_layout()
     handles, labels = axs[0, 0].get_legend_handles_labels()
-    fig.legend(handles, labels, title="Decile", loc="upper right")
+    q_levels = np.linspace(1, 10, len(handles))
+    new_labels = [f"Decile {q:.0f}" for q in q_levels]
+    fig.legend(handles, new_labels, title="Decile", loc="upper right")
     plt.savefig(join(images_folder, "quantiles_with_bos.png"))
     plt.close()
 
@@ -268,13 +270,15 @@ def main(num_samples=200, sae_id="jbloom/GPT2-Small-SAEs-Reformatted", llm_id="g
 
     plt.tight_layout()
     handles, labels = axs[0, 0].get_legend_handles_labels()
-    fig.legend(handles, labels, title="Decile", loc="upper right")
+    q_levels = np.linspace(1, 10, len(handles))
+    new_labels = [f"Decile {q:.0f}" for q in q_levels]
+    fig.legend(handles, new_labels, title="Decile", loc="upper right")
     plt.savefig(join(images_folder, "quantiles_without_bos.png"))
     plt.close()
 
     # 3) token_meanvs_std
     fig, axs = plt.subplots(3, 4, figsize=(40, 24))
-    fig.suptitle("Token Mean vs. STD")
+    fig.suptitle("Token Mean vs. Standard Deviation")
     for layer_i in range(12):
         ax = axs[layer_i // 4, layer_i % 4]
         tm = token_means[layer_i][1:]
@@ -283,15 +287,19 @@ def main(num_samples=200, sae_id="jbloom/GPT2-Small-SAEs-Reformatted", llm_id="g
         sc = ax.scatter(tm, ts, c=color_vals, cmap=POSITION_PALETTE, s=8)
         ax.set_title(f"Layer {layer_i}")
         ax.set_xlabel("Mean")
-        ax.set_ylabel("STD")
-        ax.set_xscale("log")
-        ax.set_yscale("log")
+        ax.set_ylabel("Standard Deviation")
         # Annotate outliers
         for idx in range(len(tm)):
             if tm[idx] > 100:
                 ax.annotate(str(idx), (tm[idx], ts[idx]), xytext=(5, 5),
                             textcoords="offset points", fontsize=6, color='black')
-    plt.tight_layout()
+    fig.subplots_adjust(right=0.9)
+    cbar_ax = fig.add_axes([0.91, 0.11, 0.01, 0.77])
+    cbar = fig.colorbar(sc, cax=cbar_ax, orientation='vertical')
+    cbar.set_label('Token Index')
+    tick_locs = np.linspace(0, len(tm) - 1, min(len(tm), 10))
+    cbar.set_ticks(tick_locs)
+    cbar.set_ticklabels([str(int(x)) for x in tick_locs])
     plt.savefig(join(images_folder, "token_meanvs_std.png"))
     plt.close()
 
@@ -307,7 +315,13 @@ def main(num_samples=200, sae_id="jbloom/GPT2-Small-SAEs-Reformatted", llm_id="g
         ax.set_title(f"Layer {layer_i}")
         ax.set_xlabel("Token Index")
         ax.set_ylabel("Activation")
-    plt.tight_layout()
+    fig.subplots_adjust(right=0.9)
+    cbar_ax = fig.add_axes([0.91, 0.11, 0.01, 0.77])
+    cbar = fig.colorbar(sc, cax=cbar_ax, orientation='vertical')
+    cbar.set_label('Token Index')
+    tick_locs = np.linspace(0, len(tm) - 1, min(len(tm), 10))
+    cbar.set_ticks(tick_locs)
+    cbar.set_ticklabels([str(int(x)) for x in tick_locs])
     plt.savefig(join(images_folder, "avg_activation_with_bos.png"))
     plt.close()
 
@@ -325,10 +339,31 @@ def main(num_samples=200, sae_id="jbloom/GPT2-Small-SAEs-Reformatted", llm_id="g
         ax.set_title(f"Layer {layer_i}")
         ax.set_xlabel("Token Index (Skipping BOS)")
         ax.set_ylabel("Activation")
-    plt.tight_layout()
+    fig.subplots_adjust(right=0.9)
+    cbar_ax = fig.add_axes([0.91, 0.11, 0.01, 0.77])
+    cbar = fig.colorbar(sc, cax=cbar_ax, orientation='vertical')
+    cbar.set_label('Token Index')
+    tick_locs = np.linspace(0, len(tm) - 1, min(len(tm), 10))
+    cbar.set_ticks(tick_locs)
+    cbar.set_ticklabels([str(int(x)) for x in tick_locs])
     plt.savefig(join(images_folder, "avg_activation_without_bos.png"))
     plt.close()
 
+    # 6) avg_activation_smoothing
+    plt.figure(figsize=(12, 8))
+    plt.title("Smoothed Avg Activation per Token (All Layers)")
+    for layer_i in range(12):
+        tm = token_means[layer_i]
+        if len(tm) > 1:
+            x_idx = np.arange(len(tm) - 1)
+            val_ = tm[1:]
+            smoothed_val = np.convolve(val_, np.ones(10)/10, mode='valid')
+            plt.plot(x_idx[:len(smoothed_val)], smoothed_val, color=LAYER_PALETTE[layer_i], label=f"Layer {layer_i}", alpha=0.7)
+    plt.xlabel("Token Index (Skipping BOS)")
+    plt.ylabel("Smoothed Activation")
+    plt.legend()
+    plt.savefig(join(images_folder, "avg_activation_smoothing.png"))
+    plt.close()
     
     # 6) L1/L2/(L1+L2) vs. token index
     fig, axs = plt.subplots(3, 4, figsize=(40, 24))
@@ -355,16 +390,22 @@ def main(num_samples=200, sae_id="jbloom/GPT2-Small-SAEs-Reformatted", llm_id="g
     fig, axs = plt.subplots(3, 4, figsize=(40, 24))
     fig.suptitle("Token Count vs. Token Density")
     for layer_i in range(12):
-        color_vals = np.arange(len(token_means[layer_i]))
+        color_vals = np.arange(len(token_means[layer_i]) - 1)
         ax = axs[layer_i // 4, layer_i % 4]
-        tm = token_means[layer_i]
-        td = token_densities[layer_i]
+        tm = token_means[layer_i][1:]
+        td = token_densities[layer_i][1:]
         if tm is not None and len(tm) == len(td):
-            ax.scatter(tm, td, s=5, cmap=POSITION_PALETTE, c=color_vals)
+            sc = ax.scatter(tm, td, s=12, cmap=POSITION_PALETTE, c=color_vals)
         ax.set_title(f"Layer {layer_i}")
         ax.set_xlabel("Activation Average")
         ax.set_ylabel("Token Density")
-    plt.tight_layout()
+    fig.subplots_adjust(right=0.9)
+    cbar_ax = fig.add_axes([0.91, 0.11, 0.01, 0.77])
+    cbar = fig.colorbar(sc, cax=cbar_ax, orientation='vertical')
+    cbar.set_label('Token Index')
+    tick_locs = np.linspace(0, len(tm) - 1, min(len(tm), 10))
+    cbar.set_ticks(tick_locs)
+    cbar.set_ticklabels([str(int(x)) for x in tick_locs])
     plt.savefig(join(images_folder, "token_count_vs_density.png"))
     plt.close()
 
@@ -392,25 +433,29 @@ def main(num_samples=200, sae_id="jbloom/GPT2-Small-SAEs-Reformatted", llm_id="g
 
     # 1) Combined_feat_mean.png
     plt.figure(figsize=(12, 8))
-    plt.title("Avg Activation per Feature (All Layers)")
+    plt.title("Feature Mean Distribution (All Layers)")
     for layer_i in range(12):
-        x_feat = np.arange(num_features)
-        plt.scatter(x_feat, all_feat_means[layer_i], color=LAYER_PALETTE[layer_i], s=5, label=f"Layer {layer_i}", alpha=0.5)
-    plt.xlabel("Feature Index")
-    plt.ylabel("Activation")
+        sns.kdeplot(
+            all_feat_means[layer_i],
+            color=LAYER_PALETTE[layer_i],
+            label=f"Layer {layer_i}"
+        )
+    plt.xlabel("Feature Mean")
+    plt.ylabel("Density")
+    plt.xscale('log')
     plt.legend()
-    plt.savefig(join(images_folder, "combined_feat_mean.png"))
+    plt.savefig(join(images_folder, "feat_mean_dist.png"))
     plt.close()
 
     # 2) Combined_feat_meanvs_std.png
     plt.figure(figsize=(12, 8))
-    plt.title("Feature Mean vs. STD (All Layers)")
+    plt.title("Feature Mean vs. Standard Deviation (All Layers)")
     for layer_i in range(12):
         fm = all_feat_means[layer_i]
         fs = all_feat_stds[layer_i]
         plt.scatter(fm, fs, color=LAYER_PALETTE[layer_i], s=5, label=f"Layer {layer_i}", alpha=0.7)
     plt.xlabel("Mean")
-    plt.ylabel("STD")
+    plt.ylabel("Standard Deviation")
     plt.legend()
     plt.savefig(join(images_folder, "combined_feat_meanvs_std.png"))
     plt.close()
@@ -422,29 +467,53 @@ def main(num_samples=200, sae_id="jbloom/GPT2-Small-SAEs-Reformatted", llm_id="g
     x = np.arange(len(ce_loss))
     plt.plot(x, ce_loss, color="grey", alpha=0.5)
     sc = plt.scatter(x, ce_loss, c=x, cmap=POSITION_PALETTE, s=12)
+    cbar = plt.colorbar(sc)
+    cbar.set_label('Token Index')
+    tick_locs = np.linspace(0, len(ce_loss) - 1, min(len(ce_loss), 10))
+    cbar.set_ticks(tick_locs)
+    cbar.set_ticklabels([str(int(x)) for x in tick_locs])
+    plt.tight_layout()
     plt.xlabel("Token Index")
     plt.ylabel("Cross Entropy Loss")
-    plt.tight_layout()
     plt.savefig(join(images_folder, "llm_token_ce_loss.png"))
     plt.close()
 
-    # 4) Decile threshold vs. count of features with mean > threshold (combined graph)
+    # 4) Activation Mean vs. Count of Features with Activation > Median (All Layers)
     plt.figure(figsize=(12, 8))
-    plt.title("Count of Features with Mean > Decile Threshold (All Layers)")
+    plt.title("Count of Features with Activation > Median (All Layers)")
     for layer_i in range(12):
+      q_wi = quantiles_wo_first[layer_i]
       fm = feat_means[layer_i]
-      deciles = np.quantile(fm, np.linspace(0, 1, 11))
-      x = np.arange(1, 11)
+      median = q_wi[:, 4]
+      x = np.linspace(0, np.max(fm), 100)
       counts = []
-      for idx in x:
-        c = np.sum(fm > deciles[idx])
-        counts.append(c)
-      plt.plot(x, counts, marker="o", color=LAYER_PALETTE[layer_i], label=f"Layer {layer_i}")
-    plt.xlabel("Decile (1..10)")
-    plt.ylabel("Count > Decile")
+      for threshold in x:
+        count = np.sum(median < threshold)
+        counts.append(count)
+      plt.plot(x, counts, color=LAYER_PALETTE[layer_i], label=f"Layer {layer_i}")
+    plt.xlabel("Activation Mean")
+    plt.ylabel("Count > Median")
     plt.legend()
     plt.tight_layout()
-    plt.savefig(join(images_folder, "feat_mean_vs_decile_counts.png"))
+    plt.savefig(join(images_folder, "activation_mean_vs_median.png"))
+    plt.close()
+
+    # 4) Activation Mean vs. Count of Features with Activation > Mean (All Layers)
+    plt.figure(figsize=(12, 8))
+    plt.title("Count of Features with Activation > Mean (All Layers)")
+    for layer_i in range(12):
+      fm = feat_means[layer_i]
+      x = np.linspace(0, np.max(fm), 100)
+      counts = []
+      for threshold in x:
+        count = np.sum(fm < threshold)
+        counts.append(count)
+      plt.plot(x, counts, color=LAYER_PALETTE[layer_i], label=f"Layer {layer_i}")
+    plt.xlabel("Activation Mean")
+    plt.ylabel("Count > Mean")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(join(images_folder, "activation_mean_vs_mean.png"))
     plt.close()
 
     print("Done. All metrics computed and visualized.")
