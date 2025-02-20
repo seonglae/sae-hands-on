@@ -11,3 +11,4 @@ images
 temp
 __pycache__
 checkpoints
+results

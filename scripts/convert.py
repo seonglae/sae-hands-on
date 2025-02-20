@@ -4,7 +4,7 @@ import warnings
 
 import torch
 from sae_lens.sae import SAE, SAEConfig
-import sae_len
+import sae_lens
 
 from sae import VanillaSAE, TopKSAE, BatchTopKSAE, JumpReLUSAE, NNetSAE, SymSAE
 
