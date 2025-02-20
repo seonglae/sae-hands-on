@@ -7,3 +7,7 @@ dist
 components.d.ts
 .slidev
 tasks
+images
+temp
+__pycache__
+checkpoints
