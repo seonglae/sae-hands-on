@@ -1,5 +1,5 @@
 from os import makedirs
-from os.path import join, isfile
+from os.path import join, isfile, isdir
 import torch
 import fire
 import pandas as pd
@@ -100,7 +100,16 @@ def feat_match(sae1_list, sae2_list, results_folder='results', local=False, site
         sae1_list = [s.strip() for s in sae1_list.split(',')]
     if isinstance(sae2_list, str):
         sae2_list = [s.strip() for s in sae2_list.split(',')]
+
     assert len(sae1_list) == len(sae2_list), f"Error: The two lists must have the same length, Current lengths: {len(sae1_list)} vs {len(sae2_list)}"
+    if local:
+        fullset = set(sae1_list + sae2_list)
+        nondir = list(filter(lambda x: not isdir(x), fullset))
+        if len(nondir) > 0:
+            print("Error: The following paths are not exists:")
+            for path in nondir:
+                print(path)
+            return
 
     # Create output folders if they don't exist
     makedirs(results_folder, exist_ok=True)
