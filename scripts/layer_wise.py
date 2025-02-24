@@ -18,6 +18,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 from sae_lens import SAE
 from datasets import load_dataset
 from transformer_lens.utils import tokenize_and_concatenate, get_act_name
+from convert import convert
 
 # Palettes
 LAYER_PALETTE = sns.color_palette("viridis", 12)
@@ -29,20 +30,13 @@ token_means = [None] * 12
 token_stds = [None] * 12
 token_densities = [None] * 12
 token_counts = [None] * 12
-sae_token_losses = [None] * 12
-sae_token_l1 = [None] * 12
-sae_token_l2 = [None] * 12
 feat_means = [None] * 12
 feat_stds = [None] * 12
 feat_densities = [None] * 12
 feat_counts = [None] * 12
 quantiles_wi_first = [None] * 12
 quantiles_wo_first = [None] * 12
-llm_token_losses = None
 
-# ------------------------------------------------------------------------
-# Minimal comments, one-liners only
-# ------------------------------------------------------------------------
 
 def compute_token_stat(acts: torch.Tensor, exclude_zeros=True, chunk_size=25000):
     # Returns count, mean, std, density per token
@@ -145,8 +139,17 @@ def plot_quantiles_on_ax(ax, quantiles, log_scale=False, palette="mako"):
     if log_scale:
         ax.set_yscale('log')
 
+def zero_hook(module, inputs, outputs):
+    """ 
+    Simple version of a steering hook. Adds a weighted vector
+    to the residual. Customize if needed.
+    """
+    embedding = outputs[0]
+    zero = torch.zeros_like(embedding).unsqueeze(0)
+    return zero
 
-def main(num_samples=200, sae_id="jbloom/GPT2-Small-SAEs-Reformatted", llm_id="gpt2", site="resid_pre", layers=12, images_folder="images"):
+
+def main(num_samples=1000, sae_id="jbloom/GPT2-Small-SAEs-Reformatted", llm_id="gpt2", site="resid_pre", layers=12, images_folder="images", zero=False):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     device = "mps" if torch.backends.mps.is_available() else device
 
@@ -154,6 +157,8 @@ def main(num_samples=200, sae_id="jbloom/GPT2-Small-SAEs-Reformatted", llm_id="g
     tokenizer = AutoTokenizer.from_pretrained(llm_id)
     llm = AutoModelForCausalLM.from_pretrained(llm_id).to(device)
     llm.eval()
+    if zero:
+        llm.transformer.wte.register_forward_hook(zero_hook)
 
     # Load dataset
     dataset = load_dataset("NeelNanda/pile-10k", split="train")
@@ -170,34 +175,20 @@ def main(num_samples=200, sae_id="jbloom/GPT2-Small-SAEs-Reformatted", llm_id="g
     hooks = [get_act_name(site, i) for i in range(layers)]
     for layer_i, hook in enumerate(hooks):
         print(f"\nLayer {layer_i} - Loading SAE")
-        sae, _, _ = SAE.from_pretrained(sae_id, hook, device=device)
-        all_acts, all_l1, all_l2, ces = [], [], [], []
+        sae, original = convert(f'./checkpoints/gpt2-small_blocks.{layer_i}.hook_resid_pre_12288_topk_16_0.0003_49_TinyStories_24413')
+        all_acts = []
 
         print(f"Layer {layer_i} - Gathering activations for {num_samples} sequences")
         for encoding in tqdm(sample_subset, desc=f"Layer {layer_i}"):
             with torch.no_grad():
                 outputs = llm(encoding.to(device), output_hidden_states=True)
                 hidden_state = outputs.hidden_states[layer_i]
-                logits = outputs.logits
-                shift_logits = logits[:-1, :]
-                labels = encoding[1:].to(device)
-                ce = F.cross_entropy(shift_logits, labels, reduction='none')
-                ces.append(ce.unsqueeze(0).to(torch.float16).cpu())
-                act = sae.encode(hidden_state).float()
-                recon = sae.decode(act)
-                act = act.to(torch.float16)
-                l1 = torch.sum(torch.abs(act), dim=2) * 8e-05 # L1 coefficient from huggingface config
-                l2 = F.mse_loss(hidden_state, recon, reduction='none').mean(dim=2)
+                act = sae.encode(hidden_state).to(torch.float16)
                 all_acts.append(act.cpu())
-                all_l1.append(l1.unsqueeze(0).to(torch.float16).cpu())
-                all_l2.append(l2.unsqueeze(0).to(torch.float16).cpu())
 
         print(f"Layer {layer_i} - Aggregating Tensors")
         stacked_acts = torch.cat(all_acts, dim=0).to(torch.float16) # (num_samples, num_tokens, num_features)
-        stacked_l1 = torch.cat(all_l1, dim=0).mean(dim=0) # (num_samples, num_tokens) -> (num_tokens,)
-        stacked_l2 = torch.cat(all_l2, dim=0).mean(dim=0) # (num_samples, num_tokens) -> (num_tokens,)
-        stacked_ce = torch.cat(ces, dim=0).mean(dim=0) # (num_samples - 1, num_tokens) -> (num_tokens - 1,)
-        del all_acts, all_l1, all_l2, ces
+        del all_acts
 
         print(f"Layer {layer_i} - Computing token-level stats")
         t_count, t_mean, t_std, t_density = compute_token_stat(stacked_acts, exclude_zeros=True)
@@ -214,28 +205,19 @@ def main(num_samples=200, sae_id="jbloom/GPT2-Small-SAEs-Reformatted", llm_id="g
         token_stds[layer_i] = t_std.cpu().numpy()
         token_counts[layer_i] = t_count.cpu().numpy()
         token_densities[layer_i] = t_density.cpu().numpy()
-        sae_token_l1[layer_i] = stacked_l1.numpy()
-        sae_token_l2[layer_i] = stacked_l2.numpy()
-        sae_token_losses[layer_i] = (stacked_l1 + stacked_l2).numpy()
         feat_means[layer_i] = f_mean.cpu().numpy()
         feat_stds[layer_i] = f_std.cpu().numpy()
         feat_counts[layer_i] = f_count.cpu().numpy()
         feat_densities[layer_i] = f_density.cpu().numpy()
         quantiles_wi_first[layer_i] = q_wi.cpu().numpy()
         quantiles_wo_first[layer_i] = q_wo.cpu().numpy()
-        llm_token_losses = stacked_ce.cpu().numpy()
 
-        del stacked_acts, stacked_l1, stacked_l2, sae, q_wi, q_wo
+        del stacked_acts, sae, q_wi, q_wo
         torch.cuda.empty_cache()
         print(f"Layer {layer_i} done.\n")
 
     # --------------------------------------------------------------------
-    # Visualization: 5 images, each (3x4) subplots for 12 layers
-    # 1) quantiles_with_bos.png
-    # 2) quantiles_without_bos.png
-    # 3) token_meanvs_std.png
-    # 4) avg_activation_with_bos.png
-    # 5) avg_activation_without_bos.png
+    # Visualization
     # --------------------------------------------------------------------
     os.makedirs(images_folder, exist_ok=True)
     matplotlib.rcParams.update({'font.size': 18})
@@ -361,29 +343,7 @@ def main(num_samples=200, sae_id="jbloom/GPT2-Small-SAEs-Reformatted", llm_id="g
             plt.plot(x_idx[:len(smoothed_val)], smoothed_val, color=LAYER_PALETTE[layer_i], label=f"Layer {layer_i}", alpha=0.7)
     plt.xlabel("Token Index (Skipping BOS)")
     plt.ylabel("Smoothed Activation")
-    plt.legend()
     plt.savefig(join(images_folder, "avg_activation_smoothing.png"))
-    plt.close()
-    
-    # 6) L1/L2/(L1+L2) vs. token index
-    fig, axs = plt.subplots(3, 4, figsize=(40, 24))
-    fig.suptitle("L1, L2, and Sum Loss per Token")
-    for layer_i in range(12):
-        ax = axs[layer_i // 4, layer_i % 4]
-        l1 = sae_token_l1[layer_i].flatten()[1:]
-        l2 = sae_token_l2[layer_i].flatten()[1:]
-        loss = sae_token_losses[layer_i].flatten()[1:]
-        x = np.arange(len(l1))
-        ax.plot(x, l1, color="red", label="L1", alpha=0.5)
-        ax.plot(x, l2, color="green", label="L2", alpha=0.5)
-        ax.plot(x, loss, color="blue", label="L1+L2", alpha=0.5)
-        ax.set_title(f"Layer {layer_i}")
-        ax.set_xlabel("Token")
-        ax.set_ylabel("Loss")
-        if layer_i == 0:
-            ax.legend()
-    plt.tight_layout()
-    plt.savefig(join(images_folder, "l1_l2_sum_losses.png"))
     plt.close()
 
     # 7) Token count vs. token density
@@ -443,7 +403,6 @@ def main(num_samples=200, sae_id="jbloom/GPT2-Small-SAEs-Reformatted", llm_id="g
     plt.xlabel("Feature Mean")
     plt.ylabel("Density")
     plt.xscale('log')
-    plt.legend()
     plt.savefig(join(images_folder, "feat_mean_dist.png"))
     plt.close()
 
@@ -456,26 +415,7 @@ def main(num_samples=200, sae_id="jbloom/GPT2-Small-SAEs-Reformatted", llm_id="g
         plt.scatter(fm, fs, color=LAYER_PALETTE[layer_i], s=5, label=f"Layer {layer_i}", alpha=0.7)
     plt.xlabel("Mean")
     plt.ylabel("Standard Deviation")
-    plt.legend()
     plt.savefig(join(images_folder, "combined_feat_meanvs_std.png"))
-    plt.close()
-
-    # 3) LLM Token Cross Entropy Loss per Token
-    plt.figure(figsize=(12, 8))
-    plt.title("LLM Token Cross Entropy Loss per Token")
-    ce_loss = llm_token_losses.flatten()
-    x = np.arange(len(ce_loss))
-    plt.plot(x, ce_loss, color="grey", alpha=0.5)
-    sc = plt.scatter(x, ce_loss, c=x, cmap=POSITION_PALETTE, s=12)
-    cbar = plt.colorbar(sc)
-    cbar.set_label('Token Index')
-    tick_locs = np.linspace(0, len(ce_loss) - 1, min(len(ce_loss), 10))
-    cbar.set_ticks(tick_locs)
-    cbar.set_ticklabels([str(int(x)) for x in tick_locs])
-    plt.tight_layout()
-    plt.xlabel("Token Index")
-    plt.ylabel("Cross Entropy Loss")
-    plt.savefig(join(images_folder, "llm_token_ce_loss.png"))
     plt.close()
 
     # 4) Activation Mean vs. Count of Features with Activation > Median (All Layers)
@@ -493,7 +433,6 @@ def main(num_samples=200, sae_id="jbloom/GPT2-Small-SAEs-Reformatted", llm_id="g
       plt.plot(x, counts, color=LAYER_PALETTE[layer_i], label=f"Layer {layer_i}")
     plt.xlabel("Activation Mean")
     plt.ylabel("Count > Median")
-    plt.legend()
     plt.tight_layout()
     plt.savefig(join(images_folder, "activation_mean_vs_median.png"))
     plt.close()
@@ -511,7 +450,6 @@ def main(num_samples=200, sae_id="jbloom/GPT2-Small-SAEs-Reformatted", llm_id="g
       plt.plot(x, counts, color=LAYER_PALETTE[layer_i], label=f"Layer {layer_i}")
     plt.xlabel("Activation Mean")
     plt.ylabel("Count > Mean")
-    plt.legend()
     plt.tight_layout()
     plt.savefig(join(images_folder, "activation_mean_vs_mean.png"))
     plt.close()
