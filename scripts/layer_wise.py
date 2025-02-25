@@ -1,6 +1,6 @@
 """
 Example usage:
-    python scripts/layer-wise.py --num_samples=100
+    python scripts/layer_wise.py --num_samples=100
 """
 
 import os
@@ -149,7 +149,13 @@ def zero_hook(module, inputs, outputs):
     return zero
 
 
-def main(num_samples=1000, sae_id="jbloom/GPT2-Small-SAEs-Reformatted", llm_id="gpt2", site="resid_pre", layers=12, images_folder="images", zero=False):
+def shuffle_hook(module, inputs, outputs):
+    embedding = outputs[0]
+    shuffled = embedding[torch.randperm(embedding.size(0)), :]
+    return (shuffled)
+
+
+def main(num_samples=1000, sae_id="jbloom/GPT2-Small-SAEs-Reformatted", llm_id="gpt2", site="resid_pre", layers=12, images_folder="images", zero=False, local=False, shuffle=False):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     device = "mps" if torch.backends.mps.is_available() else device
 
@@ -158,7 +164,9 @@ def main(num_samples=1000, sae_id="jbloom/GPT2-Small-SAEs-Reformatted", llm_id="
     llm = AutoModelForCausalLM.from_pretrained(llm_id).to(device)
     llm.eval()
     if zero:
-        llm.transformer.wte.register_forward_hook(zero_hook)
+        llm.transformer.wpe.register_forward_hook(zero_hook)
+    if shuffle:
+        llm.transformer.wpe.register_forward_hook(shuffle_hook)
 
     # Load dataset
     dataset = load_dataset("NeelNanda/pile-10k", split="train")
@@ -175,7 +183,10 @@ def main(num_samples=1000, sae_id="jbloom/GPT2-Small-SAEs-Reformatted", llm_id="
     hooks = [get_act_name(site, i) for i in range(layers)]
     for layer_i, hook in enumerate(hooks):
         print(f"\nLayer {layer_i} - Loading SAE")
-        sae, original = convert(f'./checkpoints/gpt2-small_blocks.{layer_i}.hook_resid_pre_12288_topk_16_0.0003_49_TinyStories_24413')
+        if local:
+            sae, original = convert(f'./checkpoints/gpt2-small_blocks.{layer_i}.hook_resid_pre_12288_topk_16_0.0003_49_TinyStories_24413')
+        else:
+            sae, _, _ = SAE.from_pretrained(sae_id, hook, device=device)
         all_acts = []
 
         print(f"Layer {layer_i} - Gathering activations for {num_samples} sequences")
@@ -237,7 +248,7 @@ def main(num_samples=1000, sae_id="jbloom/GPT2-Small-SAEs-Reformatted", llm_id="
     q_levels = np.linspace(1, 10, len(handles))
     new_labels = [f"Decile {q:.0f}" for q in q_levels]
     fig.legend(handles, new_labels, title="Decile", loc="upper right")
-    plt.savefig(join(images_folder, "quantiles_with_bos.png"))
+    plt.savefig(join(images_folder, f"{'zero_' if zero else ''}{'shuffle_' if shuffle else ''}quantiles_with_bos.png"))
     plt.close()
 
     # 2) quantiles without bos
@@ -255,7 +266,7 @@ def main(num_samples=1000, sae_id="jbloom/GPT2-Small-SAEs-Reformatted", llm_id="
     q_levels = np.linspace(1, 10, len(handles))
     new_labels = [f"Decile {q:.0f}" for q in q_levels]
     fig.legend(handles, new_labels, title="Decile", loc="upper right")
-    plt.savefig(join(images_folder, "quantiles_without_bos.png"))
+    plt.savefig(join(images_folder, f"{'zero_' if zero else ''}{'shuffle_' if shuffle else ''}quantiles_without_bos.png"))
     plt.close()
 
     # 3) token_meanvs_std
@@ -282,7 +293,7 @@ def main(num_samples=1000, sae_id="jbloom/GPT2-Small-SAEs-Reformatted", llm_id="
     tick_locs = np.linspace(0, len(tm) - 1, min(len(tm), 10))
     cbar.set_ticks(tick_locs)
     cbar.set_ticklabels([str(int(x)) for x in tick_locs])
-    plt.savefig(join(images_folder, "token_meanvs_std.png"))
+    plt.savefig(join(images_folder, f"{'zero_' if zero else ''}{'shuffle_' if shuffle else ''}token_meanvs_std.png"))
     plt.close()
 
     # 4) avg_activation_with_bos
@@ -304,7 +315,7 @@ def main(num_samples=1000, sae_id="jbloom/GPT2-Small-SAEs-Reformatted", llm_id="
     tick_locs = np.linspace(0, len(tm) - 1, min(len(tm), 10))
     cbar.set_ticks(tick_locs)
     cbar.set_ticklabels([str(int(x)) for x in tick_locs])
-    plt.savefig(join(images_folder, "avg_activation_with_bos.png"))
+    plt.savefig(join(images_folder, f"{'zero_' if zero else ''}{'shuffle_' if shuffle else ''}avg_activation_with_bos.png"))
     plt.close()
 
     # 5) avg_activation_without_bos
@@ -328,7 +339,7 @@ def main(num_samples=1000, sae_id="jbloom/GPT2-Small-SAEs-Reformatted", llm_id="
     tick_locs = np.linspace(0, len(tm) - 1, min(len(tm), 10))
     cbar.set_ticks(tick_locs)
     cbar.set_ticklabels([str(int(x)) for x in tick_locs])
-    plt.savefig(join(images_folder, "avg_activation_without_bos.png"))
+    plt.savefig(join(images_folder, f"{'zero_' if zero else ''}{'shuffle_' if shuffle else ''}avg_activation_without_bos.png"))
     plt.close()
 
     # 6) avg_activation_smoothing
@@ -343,7 +354,7 @@ def main(num_samples=1000, sae_id="jbloom/GPT2-Small-SAEs-Reformatted", llm_id="
             plt.plot(x_idx[:len(smoothed_val)], smoothed_val, color=LAYER_PALETTE[layer_i], label=f"Layer {layer_i}", alpha=0.7)
     plt.xlabel("Token Index (Skipping BOS)")
     plt.ylabel("Smoothed Activation")
-    plt.savefig(join(images_folder, "avg_activation_smoothing.png"))
+    plt.savefig(join(images_folder, f"{'zero_' if zero else ''}{'shuffle_' if shuffle else ''}avg_activation_smoothing.png"))
     plt.close()
 
     # 7) Token count vs. token density
@@ -366,7 +377,7 @@ def main(num_samples=1000, sae_id="jbloom/GPT2-Small-SAEs-Reformatted", llm_id="
     tick_locs = np.linspace(0, len(tm) - 1, min(len(tm), 10))
     cbar.set_ticks(tick_locs)
     cbar.set_ticklabels([str(int(x)) for x in tick_locs])
-    plt.savefig(join(images_folder, "token_count_vs_density.png"))
+    plt.savefig(join(images_folder, f"{'zero_' if zero else ''}{'shuffle_' if shuffle else ''}token_count_vs_density.png"))
     plt.close()
 
     # 8) Feature count vs. feature density
@@ -381,7 +392,7 @@ def main(num_samples=1000, sae_id="jbloom/GPT2-Small-SAEs-Reformatted", llm_id="
         ax.set_xlabel("Activation Average")
         ax.set_ylabel("Feature Density")
     plt.tight_layout()
-    plt.savefig(join(images_folder, "feat_count_vs_density.png"))
+    plt.savefig(join(images_folder, f"{'zero_' if zero else ''}{'shuffle_' if shuffle else ''}feat_count_vs_density.png"))
     plt.close()
 
     # --------------------------------------------------------------------
@@ -403,7 +414,7 @@ def main(num_samples=1000, sae_id="jbloom/GPT2-Small-SAEs-Reformatted", llm_id="
     plt.xlabel("Feature Mean")
     plt.ylabel("Density")
     plt.xscale('log')
-    plt.savefig(join(images_folder, "feat_mean_dist.png"))
+    plt.savefig(join(images_folder, f"{'zero_' if zero else ''}{'shuffle_' if shuffle else ''}feat_mean_dist.png"))
     plt.close()
 
     # 2) Combined_feat_meanvs_std.png
@@ -415,7 +426,7 @@ def main(num_samples=1000, sae_id="jbloom/GPT2-Small-SAEs-Reformatted", llm_id="
         plt.scatter(fm, fs, color=LAYER_PALETTE[layer_i], s=5, label=f"Layer {layer_i}", alpha=0.7)
     plt.xlabel("Mean")
     plt.ylabel("Standard Deviation")
-    plt.savefig(join(images_folder, "combined_feat_meanvs_std.png"))
+    plt.savefig(join(images_folder, f"{'zero_' if zero else ''}{'shuffle_' if shuffle else ''}combined_feat_meanvs_std.png"))
     plt.close()
 
     # 4) Activation Mean vs. Count of Features with Activation > Median (All Layers)
@@ -434,7 +445,7 @@ def main(num_samples=1000, sae_id="jbloom/GPT2-Small-SAEs-Reformatted", llm_id="
     plt.xlabel("Activation Mean")
     plt.ylabel("Count > Median")
     plt.tight_layout()
-    plt.savefig(join(images_folder, "activation_mean_vs_median.png"))
+    plt.savefig(join(images_folder, f"{'zero_' if zero else ''}{'shuffle_' if shuffle else ''}activation_mean_vs_median.png"))
     plt.close()
 
     # 4) Activation Mean vs. Count of Features with Activation > Mean (All Layers)
@@ -451,7 +462,7 @@ def main(num_samples=1000, sae_id="jbloom/GPT2-Small-SAEs-Reformatted", llm_id="
     plt.xlabel("Activation Mean")
     plt.ylabel("Count > Mean")
     plt.tight_layout()
-    plt.savefig(join(images_folder, "activation_mean_vs_mean.png"))
+    plt.savefig(join(images_folder, f"{'zero_' if zero else ''}{'shuffle_' if shuffle else ''}activation_mean_vs_mean.png"))
     plt.close()
 
     print("Done. All metrics computed and visualized.")
