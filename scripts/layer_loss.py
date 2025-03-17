@@ -221,7 +221,12 @@ def main(num_samples=1000, sae_id="jbloom/GPT2-Small-SAEs-Reformatted", llm_id="
         plt.tight_layout()
         plt.xlabel("Token Index")
         plt.ylabel("Cross Entropy Loss")
-        plt.savefig(join(images_folder, "llm_token_ce_loss.png"))
+        file_name = "llm_token_ce_loss.png"
+        if zero:
+            file_name = "zero_" + file_name
+        if shuffle:
+            file_name = "shuffle_" + file_name
+        plt.savefig(join(images_folder, file_name))
         plt.close()
 
     print("Done. All metrics computed and visualized.")
