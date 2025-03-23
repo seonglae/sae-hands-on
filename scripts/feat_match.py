@@ -29,7 +29,7 @@ def load_sae(sae_id, local, site, device):
     return sae
 
 def weight_sim(w1, w2, topk=4):
-    return torch.stack([torch.nn.functional.cosine_similarity(w1, w2[i, :], dim=1).topk(topk).values.detach().cpu() for i in range(w2.shape[0])])
+    return torch.stack([torch.nn.functional.cosine_similarity(w1, w2[i, :], dim=1).topk(topk).values.detach().cpu() for i in range(w2.shape[0])]).to(torch.float32)
 
 def decoder_feature_sim(sae1, sae2, topk=4): 
     return weight_sim(sae1.W_dec, sae2.W_dec, topk)
@@ -163,11 +163,11 @@ def feat_match(sae1_list, sae2_list, results_folder='results', local=False, site
 
         # UMAP visualization
         sae_id1 = sae_id1.split('/')[-1]
-        data = sae1.W_dec.detach().cpu().numpy()
+        data = sae1.W_dec.to(torch.float32).detach().cpu().numpy()
         if not isfile(join(results_folder, 'umap', f"{sae_id1}.png")):
             viz_umap(data, sae_id1, results_folder)
         sae_id2 = sae_id2.split('/')[-1]
-        data = sae2.W_dec.detach().cpu().numpy()
+        data = sae2.W_dec.to(torch.float32).detach().cpu().numpy()
         if not isfile(join(results_folder, 'umap', f"{sae_id2}.png")):
             viz_umap(data, sae_id2, results_folder)
 

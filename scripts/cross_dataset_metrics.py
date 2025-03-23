@@ -276,8 +276,6 @@ def create_visualizations(df, results_folder, layer, dict_size, topk, seed):
         plt.title(title)
         plt.tight_layout()
     
-    # Add overall title
-    plt.suptitle(f"Cross-Dataset Metrics: Layer {layer}", y=0.98, fontsize=16)
     plt.tight_layout(rect=[0, 0, 1, 0.96])
     
     # Save the figure
