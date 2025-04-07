@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from tqdm import tqdm
 import json
+from scipy.optimize import linear_sum_assignment
 
 import umap
 from sklearn.manifold import TSNE
@@ -42,6 +43,29 @@ def encoder_feature_sim(sae1, sae2, topk=4):
 
 def encoder_neuron_sim(sae1, sae2, topk=4): 
     return weight_sim(sae1.W_enc, sae2.W_enc, topk)
+
+def compute_similarity_matrix(w1, w2, batch_size=4096):
+    """Compute pairwise cosine similarity matrix between two sets of weights."""
+    # Normalize weights for cosine similarity
+    w1_norm = w1 / w1.norm(dim=1, keepdim=True)
+    w2_norm = w2 / w2.norm(dim=1, keepdim=True)
+    
+    n, m = w1_norm.shape[0], w2_norm.shape[0]
+    sim_matrix = torch.zeros((n, m), device=w1.device)
+    
+    for i in range(0, n, batch_size):
+        batch_end = min(i + batch_size, n)
+        batch1 = w1_norm[i:batch_end]
+        
+        for j in range(0, m, batch_size):
+            batch_end2 = min(j + batch_size, m)
+            batch2 = w2_norm[j:batch_end2]
+            
+            # Compute normalized dot product for cosine similarity
+            sim_batch = torch.matmul(batch1, batch2.T)
+            sim_matrix[i:batch_end, j:batch_end2] = sim_batch
+            
+    return sim_matrix
 
 def viz_dist(data, title, xlabel, ylabel='Activation', color='blue',
              log_scale=False, size=20, bins=100, save_path=None):
@@ -85,7 +109,7 @@ def viz_tsne(data, base_name, results_folder, perplexity, max_iter=5000, folder_
     plt.savefig(save_file)
     plt.close()
 
-def feat_match(sae1_list, sae2_list, results_folder='results', local=False, site=None, topk=4, threshold=0.7):
+def feat_match(sae1_list, sae2_list, results_folder='results', local=False, site=None, topk=4, threshold=0.7, batch_size=4096):
     """
     Compare SAE models pairwise and generate similarity distribution plots.
     Also computes the ratio of decoder feature top1 activations above the threshold.
@@ -119,9 +143,10 @@ def feat_match(sae1_list, sae2_list, results_folder='results', local=False, site
     makedirs(join(results_folder, 'dn'), exist_ok=True)
     makedirs(join(results_folder, 'umap'), exist_ok=True)
     
-
     # Process each pair of SAE models
     top1_ratios = {}
+    hungarian_ratios = {}
+    
     for sae_id1, sae_id2 in zip(sae1_list, sae2_list):
         print(f"Processing pair: {sae_id1} vs {sae_id2}")
         sae1 = load_sae(sae_id1, local, site, device)
@@ -137,18 +162,56 @@ def feat_match(sae1_list, sae2_list, results_folder='results', local=False, site
             enc_feat_df = pd.DataFrame(enc_feat.numpy(), columns=columns)
             viz_dist(enc_feat_df, 'CosSim Distribution of Encoder Features', 
                      'Cosine Similarity', save_path=join(results_folder, 'ef', f"{base_name}.png"))
+            
+            # Calculate decoder feature similarity
             dec_feat = decoder_feature_sim(sae1, sae2)
             dec_feat_df = pd.DataFrame(dec_feat.numpy(), columns=columns)
             viz_dist(dec_feat_df, 'CosSim Distribution of Decoder Features', 
                      'Cosine Similarity', save_path=join(results_folder, 'df', f"{base_name}.png"))
             
-            # Compute top1 ratio for decoder features
+            # Traditional top1 ratio calculation
             top1 = dec_feat[:, 0]
             ratio = (top1 > threshold).float().mean().item()
             top1_ratios[base_name] = ratio
+            
+            # Hungarian matching for optimal feature pairing
+            try:
+                # Compute full similarity matrix
+                sim_matrix = compute_similarity_matrix(sae1.W_dec, sae2.W_dec, batch_size)
+                
+                # Find optimal assignment using Hungarian algorithm
+                row_indices, col_indices = linear_sum_assignment(-sim_matrix.detach().cpu().numpy())  # Negate for maximization
+                
+                # Get matched similarities
+                matched_sims = sim_matrix[row_indices, col_indices].detach().cpu()
+                # Calculate ratio of matches above threshold
+                hungarian_ratio = (matched_sims > threshold).float().mean().item()
+                hungarian_ratios[base_name] = hungarian_ratio
+                
+                # Generate visualization of Hungarian matching
+                plt.figure(figsize=(10, 6))
+                sns.histplot(matched_sims.numpy(), bins=50, kde=True)
+                plt.axvline(x=threshold, color='r', linestyle='--', label=f'Threshold ({threshold})')
+                plt.title(f"Hungarian Matched Feature Similarity: {base_name}")
+                plt.xlabel("Cosine Similarity")
+                plt.ylabel("Count")
+                plt.legend()
+                plt.savefig(join(results_folder, 'df', f"{base_name}_hungarian.png"))
+                plt.close()
+                
+                print(f"Top1 ratio: {ratio:.4f}, Hungarian ratio: {hungarian_ratio:.4f}")
+            except Exception as e:
+                print(f"Error computing Hungarian matching: {e}")
+                hungarian_ratios[base_name] = None
+            
+            # Save both ratio types
             json_path = join(results_folder, 'df', 'top1.json')
             with open(json_path, 'w') as f:
                 json.dump(top1_ratios, f, indent=2)
+                
+            json_path = join(results_folder, 'df', 'hungarian.json')
+            with open(json_path, 'w') as f:
+                json.dump(hungarian_ratios, f, indent=2)
 
         if sae1.cfg.d_sae == sae2.cfg.d_sae:
             enc_neur = encoder_neuron_sim(sae1, sae2)
@@ -160,7 +223,6 @@ def feat_match(sae1_list, sae2_list, results_folder='results', local=False, site
             viz_dist(dec_neur_df, 'CosSim Distribution of Decoder Neurons', 
                      'Cosine Similarity', save_path=join(results_folder, 'dn', f"{base_name}.png"))
 
-
         # UMAP visualization
         sae_id1 = sae_id1.split('/')[-1]
         data = sae1.W_dec.to(torch.float32).detach().cpu().numpy()
@@ -171,9 +233,7 @@ def feat_match(sae1_list, sae2_list, results_folder='results', local=False, site
         if not isfile(join(results_folder, 'umap', f"{sae_id2}.png")):
             viz_umap(data, sae_id2, results_folder)
 
-
         print(f"Plots saved for pair: {base_name}")
-
 
 if __name__ == '__main__':
     fire.Fire(feat_match)
