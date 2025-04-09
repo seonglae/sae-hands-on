@@ -25,11 +25,11 @@ from convert import convert
 tokenizer = None
 
 # Dataset options with actual paths
-DATASET_OPTIONS = {
-    "openwebtext": "Skylion007/openwebtext", 
+dataset_ids = {
+    "fineweb": "HuggingFaceFW/fineweb", 
     "tinystories": "roneneldan/TinyStories",
-    "redpajama": "togethercomputer/RedPajama-Data-1T",
-    "pile": "monology/pile-uncopyrighted"
+    "pile": "monology/pile-uncopyrighted",
+    "openwebtext": "Skylion007/openwebtext",
 }
 
 def calculate_explained_variance(original, reconstructed):
@@ -54,7 +54,7 @@ def evaluate_sae_on_dataset(sae, llm, dataset_samples, device, layer_i, max_sequ
             orig_logits = orig_outputs.logits
             
             # Get SAE reconstruction
-            act = sae.encode(orig_hidden_state).float()
+            act = sae.encode(orig_hidden_state)
             reconstructed = sae.decode(act)
             
             # Calculate L2 loss
@@ -104,7 +104,10 @@ def apply_reconstruction(llm, input_ids, reconstructed, layer_i):
         return (reconstructed,) + inputs[1:] if len(inputs) > 1 else reconstructed
     
     # Register the pre-hook (like in layer_loss.py) instead of a forward hook
-    hook_handle = llm.transformer.h[layer_i].register_forward_pre_hook(reconstruction_pre_hook)
+    if llm.config.model_type == "gpt2":
+        hook_handle = llm.transformer.h[layer_i].register_forward_pre_hook(reconstruction_pre_hook)
+    else:
+        hook_handle = llm.model.layers[layer_i].register_forward_pre_hook(reconstruction_pre_hook)
     
     # Run the forward pass with use_cache=False to avoid IndexError
     outputs = llm(input_ids, output_hidden_states=True, use_cache=False)
@@ -115,13 +118,6 @@ def apply_reconstruction(llm, input_ids, reconstructed, layer_i):
     return outputs
 
 def load_datasets(tokenizer, max_samples=100):
-    dataset_ids = {
-        "openwebtext": "Skylion007/openwebtext", 
-        "tinystories": "roneneldan/TinyStories",
-        "redpajama": "togethercomputer/RedPajama-Data-1T",
-        "pile": "monology/pile-uncopyrighted"
-    }
-    
     all_datasets = {}
     
     for name, dataset_id in dataset_ids.items():
@@ -136,7 +132,7 @@ def load_datasets(tokenizer, max_samples=100):
             if i >= max_samples:
                 break
                 
-            if "text" in item:
+            if "text" in item and item["text"].strip():  # Check if text exists and is not empty
                 # Tokenize each example directly
                 tokens = tokenizer(item["text"], return_tensors="pt", truncation=True, max_length=512)["input_ids"][0]
                 collected_samples.append({"input_ids": tokens})
@@ -146,8 +142,8 @@ def load_datasets(tokenizer, max_samples=100):
     
     return all_datasets
 
-def main(sae_paths="./checkpoints", llm_id="gpt2", site="resid_pre", layer=8, 
-         topk=16, seed=49, dict_size=12288, num_sequences=10000, results_folder="results"):
+def main(sae_paths="./checkpoints", llm_id="meta-llama/Llama-3.2-1B", site="resid_pre", layer=12, seed=42, seq_len=512, lr=0.0002, pile=False, tiny=False, openweb=False, red=False,
+         topk=48, dict_size=14336, num_sequences=100, results_folder="results_gemma", steps=195311, half_topk=False, faithful="faithful-llama3.2-1b"):
     """
     Main function to evaluate SAEs trained on different datasets.
     
@@ -172,18 +168,25 @@ def main(sae_paths="./checkpoints", llm_id="gpt2", site="resid_pre", layer=8,
     
     print("Loading LLM and tokenizer")
     tokenizer = AutoTokenizer.from_pretrained(llm_id)
-    llm = AutoModelForCausalLM.from_pretrained(llm_id).to(device)
+    llm = AutoModelForCausalLM.from_pretrained(llm_id, torch_dtype=torch.bfloat16).to(device)
     llm.eval()
+    dataset_ids["faithful"] = f"seonglae/{faithful}"
     
     # Define SAE paths directly in main
-    sae_files_by_dataset = {
-        "tinystories": f"{sae_paths}/gpt2-small_blocks.{layer}.hook_resid_pre_12288_topk_16_0.0003_49_TinyStories_24413",
-        "openwebtext": f"{sae_paths}/gpt2-small_blocks.{layer}.hook_resid_pre_12288_topk_16_0.0003_49_openwebtext_1024_24413",
-        "redpajama": f"{sae_paths}/gpt2-small_blocks.{layer}.hook_resid_pre_12288_topk_16_0.0003_49_RedPajama-Data-1T_24413",
-        "pile": f"{sae_paths}/gpt2-small_blocks.{layer}.hook_resid_pre_12288_topk_16_0.0003_49_pile-uncopyrighted_24413"
+    sae_folders = {
+        "fineweb": f"{sae_paths}/{llm_id.split('/')[-1]}_blocks.{layer}.hook_{site}_{dict_size}_topk_{topk}_{lr}_{seed}_fineweb_{seq_len}_{steps}",
+        "faithful": f"{sae_paths}/{llm_id.split('/')[-1]}_blocks.{layer}.hook_{site}_{dict_size}_topk_{topk}_{lr}_{seed}_{faithful}_{seq_len}_{steps}"
     }
-    
-    print(f"Found {len(sae_files_by_dataset)} SAEs to evaluate")
+    if tiny:
+        sae_folders["tinystories"] = f"{sae_paths}/{llm_id.split('/')[-1]}_blocks.{layer}.hook_{site}_{dict_size}_topk_{topk}_{lr}_{seed}_TinyStories_{seq_len}_{steps}"
+    if openweb:
+        sae_folders["openwebtext"] = f"{sae_paths}/{llm_id.split('/')[-1]}_blocks.{layer}.hook_{site}_{dict_size}_topk_{topk}_{lr}_{seed}_openwebtext_{seq_len}_{steps}"
+    if red:
+        sae_folders["redpajama"] = f"{sae_paths}/{llm_id.split('/')[-1]}_blocks.{layer}.hook_{site}_{dict_size}_topk_{topk}_{lr}_{seed}_redpajama_{seq_len}_{steps}"
+    if pile:
+        sae_folders["pile"] = f"{sae_paths}/{llm_id.split('/')[-1]}_blocks.{layer}.hook_{site}_{dict_size}_topk_{topk}_{lr}_{seed}_pile-uncopyrighted_{seq_len}_{steps}"
+
+    print(f"Found {len(sae_folders)} SAEs to evaluate")
     
     print(f"Loading datasets (up to {num_sequences} sequences each)")
     all_datasets = load_datasets(tokenizer, max_samples=num_sequences)
@@ -201,13 +204,14 @@ def main(sae_paths="./checkpoints", llm_id="gpt2", site="resid_pre", layer=8,
     }
     
     all_sae_models = {}
-    for train_dataset, sae_file in sae_files_by_dataset.items():
-        print(f"\nLoading SAE trained on {train_dataset}: {sae_file}")
+    for train_dataset, sae_folder in sae_folders.items():
+        print(f"\nLoading SAE trained on {train_dataset}: {sae_folder}")
         
-        sae, config = convert(sae_file)
+        sae, original = convert(sae_folder, half_topk=half_topk)
+        llm = llm.to(original.cfg["dtype"])
         sae = sae.to(device)
         all_sae_models[train_dataset] = sae
-        print(f"Successfully loaded SAE model from {sae_file}")
+        print(f"Successfully loaded SAE model from {sae_folder}")
     
     for train_dataset, sae in all_sae_models.items():
         print(f"\nEvaluating SAE trained on {train_dataset}")
@@ -244,7 +248,7 @@ def create_visualizations(df, results_folder, layer, dict_size, topk, seed):
         return
     
     # Create a single visualization file with all metrics
-    plt.figure(figsize=(21, 7))
+    plt.figure(figsize=(25, 7))
     
     # Create a matrix for cross-dataset comparisons
     train_datasets = sorted(df['train_dataset'].unique())
