@@ -24,6 +24,27 @@ from convert import convert
 # Make tokenizer global so it's accessible in all functions
 tokenizer = None
 
+def get_sae_folders(sae_paths, llm_id, site, layer, dict_size, topk, lr, seed, seq_len, steps, faithful, tiny, openweb, red, pile):
+    dataset_ids["faithful"] = f"seonglae/{faithful}"
+    model_name = llm_id.split('/')[-1]
+    if model_name == "gpt2":
+        model_name = "gpt2-small"
+    
+    # Define SAE paths directly in main
+    sae_folders = {
+        "fineweb": f"{sae_paths}/{model_name}_blocks.{layer}.hook_{site}_{dict_size}_topk_{topk}_{lr}_{seed}_fineweb_{seq_len}_{steps}",
+        "faithful": f"{sae_paths}/{model_name}_blocks.{layer}.hook_{site}_{dict_size}_topk_{topk}_{lr}_{seed}_{faithful}_{seq_len}_{steps}"
+    }
+    if tiny:
+        sae_folders["tinystories"] = f"{sae_paths}/{model_name}_blocks.{layer}.hook_{site}_{dict_size}_topk_{topk}_{lr}_{seed}_TinyStories_{seq_len}_{steps}"
+    if openweb:
+        sae_folders["openwebtext"] = f"{sae_paths}/{model_name}_blocks.{layer}.hook_{site}_{dict_size}_topk_{topk}_{lr}_{seed}_openwebtext_{seq_len}_{steps}"
+    if red:
+        sae_folders["redpajama"] = f"{sae_paths}/{model_name}_blocks.{layer}.hook_{site}_{dict_size}_topk_{topk}_{lr}_{seed}_redpajama_{seq_len}_{steps}"
+    if pile:
+        sae_folders["pile"] = f"{sae_paths}/{model_name}_blocks.{layer}.hook_{site}_{dict_size}_topk_{topk}_{lr}_{seed}_pile-uncopyrighted_{seq_len}_{steps}"
+    return sae_folders
+
 # Dataset options with actual paths
 dataset_ids = {
     "fineweb": "HuggingFaceFW/fineweb", 
@@ -171,21 +192,11 @@ def main(sae_paths="./checkpoints", llm_id="meta-llama/Llama-3.2-1B", site="resi
     llm = AutoModelForCausalLM.from_pretrained(llm_id, torch_dtype=torch.bfloat16).to(device)
     llm.eval()
     dataset_ids["faithful"] = f"seonglae/{faithful}"
+    model_name = llm_id.split('/')[-1]
+    if model_name == "gpt2":
+        model_name = "gpt2-small"
     
-    # Define SAE paths directly in main
-    sae_folders = {
-        "fineweb": f"{sae_paths}/{llm_id.split('/')[-1]}_blocks.{layer}.hook_{site}_{dict_size}_topk_{topk}_{lr}_{seed}_fineweb_{seq_len}_{steps}",
-        "faithful": f"{sae_paths}/{llm_id.split('/')[-1]}_blocks.{layer}.hook_{site}_{dict_size}_topk_{topk}_{lr}_{seed}_{faithful}_{seq_len}_{steps}"
-    }
-    if tiny:
-        sae_folders["tinystories"] = f"{sae_paths}/{llm_id.split('/')[-1]}_blocks.{layer}.hook_{site}_{dict_size}_topk_{topk}_{lr}_{seed}_TinyStories_{seq_len}_{steps}"
-    if openweb:
-        sae_folders["openwebtext"] = f"{sae_paths}/{llm_id.split('/')[-1]}_blocks.{layer}.hook_{site}_{dict_size}_topk_{topk}_{lr}_{seed}_openwebtext_{seq_len}_{steps}"
-    if red:
-        sae_folders["redpajama"] = f"{sae_paths}/{llm_id.split('/')[-1]}_blocks.{layer}.hook_{site}_{dict_size}_topk_{topk}_{lr}_{seed}_redpajama_{seq_len}_{steps}"
-    if pile:
-        sae_folders["pile"] = f"{sae_paths}/{llm_id.split('/')[-1]}_blocks.{layer}.hook_{site}_{dict_size}_topk_{topk}_{lr}_{seed}_pile-uncopyrighted_{seq_len}_{steps}"
-
+    sae_folders = get_sae_folders(sae_paths, llm_id, site, layer, dict_size, topk, lr, seed, seq_len, steps, faithful, tiny, openweb, red, pile)
     print(f"Found {len(sae_folders)} SAEs to evaluate")
     
     print(f"Loading datasets (up to {num_sequences} sequences each)")
@@ -207,7 +218,7 @@ def main(sae_paths="./checkpoints", llm_id="meta-llama/Llama-3.2-1B", site="resi
     for train_dataset, sae_folder in sae_folders.items():
         print(f"\nLoading SAE trained on {train_dataset}: {sae_folder}")
         
-        sae, original = convert(sae_folder, half_topk=half_topk)
+        sae, original = convert(sae_folder)
         llm = llm.to(original.cfg["dtype"])
         sae = sae.to(device)
         all_sae_models[train_dataset] = sae

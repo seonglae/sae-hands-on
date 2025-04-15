@@ -9,13 +9,13 @@ import seaborn as sns
 from tqdm import tqdm
 import json
 from scipy.optimize import linear_sum_assignment
-
 import umap
 from sklearn.manifold import TSNE
-
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from sae_lens import SAE
+
 from convert import convert
+from cross_dataset_metrics import get_sae_folders
 
 # Set device
 device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -109,7 +109,8 @@ def viz_tsne(data, base_name, results_folder, perplexity, max_iter=5000, folder_
     plt.savefig(save_file)
     plt.close()
 
-def feat_match(sae1_list, sae2_list, results_folder='results', local=False, site=None, topk=4, threshold=0.7, batch_size=4096):
+def feat_match(sae_paths="./checkpoints", llm_id="meta-llama/Llama-3.2-1B", site="resid_pre", layer=12, seeds=[42, 49], seq_len=512, lr=0.0002, pile=False, tiny=False, openweb=False, red=False,
+               topk=48, dict_size=14336, num_sequences=100, steps=195311, faithful="faithful-llama3.2-1b", results_folder='results', local=True, threshold=0.7, batch_size=4096, k=4):
     """
     Compare SAE models pairwise and generate similarity distribution plots.
     Also computes the ratio of decoder feature top1 activations above the threshold.
@@ -119,21 +120,10 @@ def feat_match(sae1_list, sae2_list, results_folder='results', local=False, site
       - UMAP plots under results/umap
     sae1_list and sae2_list: Comma-separated lists (or lists) of SAE identifiers.
     """
-    # Split strings into lists if needed
-    if isinstance(sae1_list, str):
-        sae1_list = [s.strip() for s in sae1_list.split(',')]
-    if isinstance(sae2_list, str):
-        sae2_list = [s.strip() for s in sae2_list.split(',')]
-
-    assert len(sae1_list) == len(sae2_list), f"Error: The two lists must have the same length, Current lengths: {len(sae1_list)} vs {len(sae2_list)}"
-    if local:
-        fullset = set(sae1_list + sae2_list)
-        nondir = list(filter(lambda x: not isdir(x), fullset))
-        if len(nondir) > 0:
-            print("Error: The following paths are not exists:")
-            for path in nondir:
-                print(path)
-            return
+    sae1_list = get_sae_folders(sae_paths, llm_id, site, layer, dict_size, topk, lr, seeds[0], seq_len, steps, faithful, tiny, openweb, red, pile)
+    sae1_list = list(sae1_list.values())
+    sae2_list = get_sae_folders(sae_paths, llm_id, site, layer, dict_size, topk, lr, seeds[1], seq_len, steps, faithful, tiny, openweb, red, pile)
+    sae2_list = list(sae2_list.values())
 
     # Create output folders if they don't exist
     makedirs(results_folder, exist_ok=True)
@@ -153,7 +143,7 @@ def feat_match(sae1_list, sae2_list, results_folder='results', local=False, site
         sae2 = load_sae(sae_id2, local, site, device)
         
         # Prepare config for visualization
-        columns = [f"Top {i+1}" for i in range(topk)]
+        columns = [f"Top {i+1}" for i in range(k)]
         base_name = f"{sae_id1.split('/')[-1]}-{sae_id2.split('/')[-1]}"
         
         # Visualize distributions if input dimensions match
